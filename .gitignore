@@ -8,3 +8,4 @@ results/cache.sqlite
 .pytest_cache/
 *.egg-info/
 results/*.jsonl
+results/**/*.jsonl
