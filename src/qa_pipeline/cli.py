@@ -15,14 +15,22 @@ import pandas as pd
 from .evaluate import batch_acceptance, detection_report, position_bias_report
 from .heuristics import run_heuristics
 from .inject import inject_defects
-from .judge import AnthropicBackend, Cache, MockBackend, PairJudge, apply_acceptance_criteria
+from .judge import (AnthropicBackend, Cache, MockBackend, OllamaBackend, PairJudge,
+                    apply_acceptance_criteria)
 from .load import load_hh_rlhf, make_synthetic
 
 
 def _make_judge(kind: str, cache_path: str) -> PairJudge | None:
     if kind == "none":
         return None
-    backend = MockBackend() if kind == "mock" else AnthropicBackend()
+    if kind == "mock":
+        backend = MockBackend()
+    elif kind == "ollama":
+        backend = OllamaBackend()
+        backend.check()
+        print(f"Using local Ollama judge: {backend.model}")
+    else:
+        backend = AnthropicBackend()
     return PairJudge(backend=backend, cache=Cache(cache_path))
 
 
@@ -35,6 +43,7 @@ def score(df: pd.DataFrame, judge: PairJudge | None, workers: int = 8) -> pd.Dat
     j = apply_acceptance_criteria(judge.judge_frame(df, max_workers=workers))
     out = out.merge(j, on="pair_id", how="left")
     out["flag"] = out["h_flag"] | out["j_flag"].fillna(False).astype(bool)
+    out["review"] = out["j_needs_review"].fillna(False).astype(bool) & ~out["flag"]
     return out
 
 
@@ -60,6 +69,13 @@ def cmd_run(a: argparse.Namespace) -> None:
               "batch_acceptance": batch_acceptance(scored["flag"], a.max_defect_rate)}
     if a.judge != "none":
         report["position_bias"] = position_bias_report(scored)
+        caught = scored["flag"] | scored["review"]
+        report["review_queue"] = {
+            "share_of_pairs": float(scored["review"].mean()),
+            "caught_by_reject_or_review": {
+                k: float(caught[scored["injected_defect"] == k].mean())
+                for k in sorted(scored["injected_defect"].dropna().unique())},
+        }
 
     os.makedirs(a.outdir, exist_ok=True)
     scored.to_json(f"{a.outdir}/scored.jsonl", orient="records", lines=True)
@@ -77,6 +93,11 @@ def cmd_run(a: argparse.Namespace) -> None:
         pb = report["position_bias"]
         print(f"\nPosition inconsistency: {pb['position_inconsistency_rate']:.1%} "
               f"of {pb['n_judged']} pairs (judge errors: {pb['n_errors']})")
+    if "review_queue" in report:
+        rq = report["review_queue"]
+        print(f"\nHuman review queue: {rq['share_of_pairs']:.1%} of pairs")
+        print("Caught by auto-reject OR review: " + ", ".join(
+            f"{k} {v:.0%}" for k, v in rq["caught_by_reject_or_review"].items()))
     ba = report["batch_acceptance"]
     print(f"\nBatch flagged rate {ba['flagged_rate']:.1%} (95% CI upper "
           f"{ba['ci95'][1]:.1%}) -> {'ACCEPT' if ba['accepted'] else 'REJECT'}")
@@ -113,7 +134,7 @@ def main() -> None:
     for name, func in [("run", cmd_run), ("drift", cmd_drift)]:
         sp = sub.add_parser(name)
         sp.add_argument("--input", default="data/pairs.jsonl")
-        sp.add_argument("--judge", choices=["none", "mock", "anthropic"], default="none")
+        sp.add_argument("--judge", choices=["none", "mock", "anthropic", "ollama"], default="none")
         sp.add_argument("--cache", default="results/cache.sqlite")
         sp.add_argument("--workers", type=int, default=8)
         sp.add_argument("--outdir", default="results")

@@ -104,6 +104,45 @@ class AnthropicBackend:
         return "".join(b.text for b in msg.content if b.type == "text")
 
 
+class OllamaBackend:
+    """Free, local judge via Ollama (https://ollama.com). No API key, no cost."""
+
+    def __init__(self, model: str | None = None, host: str | None = None,
+                 max_tokens: int = 500):
+        self.model = model or os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+        host = host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        self.host = (host if host.startswith("http") else f"http://{host}").rstrip("/")
+        self.max_tokens = max_tokens
+
+    def _post(self, path: str, payload: dict | None = None, timeout: int = 300) -> dict:
+        import urllib.request
+        data = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(f"{self.host}{path}", data=data,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+
+    def check(self) -> None:
+        """Fail fast with a clear message if Ollama isn't running or the model is missing."""
+        try:
+            tags = self._post("/api/tags", timeout=5)
+        except Exception as e:
+            raise SystemExit(f"Can't reach Ollama at {self.host}. Is the Ollama app running? ({e})")
+        names = {m["name"] for m in tags.get("models", [])}
+        if self.model not in names and f"{self.model}:latest" not in names:
+            raise SystemExit(f"Model '{self.model}' not found. Run: ollama pull {self.model}\n"
+                             f"Installed: {sorted(names) or 'none'}")
+
+    def complete(self, system: str, user: str) -> str:
+        out = self._post("/api/chat", {
+            "model": self.model, "stream": False, "format": "json",
+            "options": {"temperature": 0, "num_predict": self.max_tokens},
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+        })
+        return out["message"]["content"]
+
+
 class MockBackend:
     """Offline stand-in that imitates a judge using simple rules.
 
@@ -218,13 +257,34 @@ class PairJudge:
 
     def judge_frame(self, df: pd.DataFrame, max_workers: int = 8) -> pd.DataFrame:
         rows = df.to_dict("records")
+        done, start, lock = [0], time.time(), threading.Lock()
+
+        def run(row: dict) -> dict:
+            res = self.judge_pair(row)
+            with lock:
+                done[0] += 1
+                if done[0] % 10 == 0 or done[0] == len(rows):
+                    rate = (time.time() - start) / done[0]
+                    left = rate * (len(rows) - done[0]) / 60
+                    print(f"  judged {done[0]}/{len(rows)} pairs, ~{left:.0f} min left",
+                          flush=True)
+            return res
+
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            results = list(ex.map(self.judge_pair, rows))
+            results = list(ex.map(run, rows))
         return pd.DataFrame(results)
 
 
-def apply_acceptance_criteria(j: pd.DataFrame, min_quality: float = 2.0) -> pd.DataFrame:
-    """Turn raw judge scores into flags, following rubric.md."""
+def apply_acceptance_criteria(j: pd.DataFrame, min_quality: float = 1.0) -> pd.DataFrame:
+    """Turn raw judge scores into flags, following rubric.md.
+
+    Calibrated on 300 HH-RLHF pairs with qwen2.5:7b (scripts/compare_configs.py, config D):
+    - Auto-reject only when the chosen response scores <= 1.0 on relevance or effort.
+    - Judge 'identical_responses' tag is diagnostic only: it fired on 11.5% of clean
+      pairs, and the exact-match heuristic already catches 100% of duplicates.
+    - Label flips go to human review, not auto-reject: the judge disagreed with the
+      annotator on 23.5% of clean pairs, so it can't be trusted to overrule labels alone.
+    """
     j = j.copy()
     ok = ~j["j_error"].astype(bool)
     j["j_label_flip"] = ok & (j["j_winner_fwd"] == "rejected") & (j["j_winner_rev"] == "rejected")
@@ -233,6 +293,7 @@ def apply_acceptance_criteria(j: pd.DataFrame, min_quality: float = 2.0) -> pd.D
     )
     j["j_identical"] = ok & j["j_issues"].apply(
         lambda x: "identical_responses" in x if isinstance(x, list) else False)
-    j["j_needs_review"] = ok & ~j["j_position_consistent"].fillna(True).astype(bool)
-    j["j_flag"] = j["j_label_flip"] | j["j_low_quality_chosen"] | j["j_identical"]
+    j["j_position_inconsistent"] = ok & ~j["j_position_consistent"].fillna(True).astype(bool)
+    j["j_flag"] = j["j_low_quality_chosen"]
+    j["j_needs_review"] = j["j_label_flip"] & ~j["j_flag"]
     return j
