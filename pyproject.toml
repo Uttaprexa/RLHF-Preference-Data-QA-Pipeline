@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qa_pipeline"
+version = "0.1.0"
+description = "Automated QA for RLHF preference data: LLM-as-judge, defect injection, drift monitoring"
+requires-python = ">=3.10"
+dependencies = [
+  "anthropic>=0.40", "datasets>=2.19", "pandas>=2.0", "numpy>=1.26",
+  "scikit-learn>=1.4", "scipy>=1.11", "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+qa-pipeline = "qa_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

@@ -1,0 +1,8 @@
+anthropic>=0.40
+datasets>=2.19
+pandas>=2.0
+numpy>=1.26
+scikit-learn>=1.4
+scipy>=1.11
+matplotlib>=3.8
+pytest>=8.0
