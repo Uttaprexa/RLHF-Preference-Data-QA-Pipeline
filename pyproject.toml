@@ -9,7 +9,7 @@ description = "Automated QA for RLHF preference data: LLM-as-judge, defect injec
 requires-python = ">=3.10"
 dependencies = [
   "anthropic>=0.40", "datasets>=2.19", "pandas>=2.0", "numpy>=1.26",
-  "scikit-learn>=1.4", "scipy>=1.11", "matplotlib>=3.8",
+  "scikit-learn>=1.4", "scipy>=1.11", "matplotlib>=3.8", "sentence-transformers>=2.7",
 ]
 
 [project.optional-dependencies]
